@@ -2,7 +2,7 @@ How to use magproc in Windows
 
 This is designed for channel names in MAG_channel_list_DGGS_v20240305.csv
 
-The output can viewed in Oasis montaj with these three DB views, all found within the 'OM_views' folder
+The output can be viewed in Oasis Montaj with these three DB views, all found within the 'OM_views' folder
 1_drape_speed_x_y_utc_DEM_laptop.dbview
 2_diurnal_utc_magcom_qc.dbview
 3_0p05_noise_comp_4th_10Hz_clip.dbview
