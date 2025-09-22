@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-def plot_line(data, line, columns=["MAGCOM", "Diurnal", "Residual"], xcolumn="index", ax=None):
+def plot_line(data, line, columns=["magcom", "diurnal", "residual"], xcolumn="index", ax=None):
     linedata = data.data.loc[line]
 
     ax1 = ax
@@ -16,10 +16,10 @@ def plot_line(data, line, columns=["MAGCOM", "Diurnal", "Residual"], xcolumn="in
 
     ax1cols = []
     for column in columns:
-        if column == "Residual":
+        if column == "residual":
             ax2 = ax1.twinx()
-            ax2.plot(xdata, linedata.MAGCOM - linedata.Diurnal, c="blue", label="Residual (MAGCOM - Diurnal)")
-            ax2.set_ylabel("Residual")
+            ax2.plot(xdata, linedata.magcom - linedata.diurnal, c="blue", label="residual (magcom - diurnal)")
+            ax2.set_ylabel("residual")
         else:
             ax1.plot(xdata, linedata[column], label=column)
             ax1cols.append(column)
@@ -45,11 +45,11 @@ def plot_drape_qc(data, line, figsize=(20, 15), **kw):
     ax4 = fig.add_subplot(gs[3], sharex=ax1)
     ax5 = fig.add_subplot(gs[4], sharex=ax1)
     
-    plot_line(data, line, columns=["Easting"], ax=ax1, **kw)
-    plot_line(data, line, columns=["Northing"], ax=ax2, **kw)
+    plot_line(data, line, columns=["easting"], ax=ax1, **kw)
+    plot_line(data, line, columns=["northing"], ax=ax2, **kw)
     plot_line(data, line, columns=["speed"], ax=ax3, **kw)
-    plot_line(data, line, columns=["drape_p15", "drape_m15", "GPSALT", "DEMIFSAR"], ax=ax4, **kw)
-    plot_line(data, line, columns=["UTCTIME"], ax=ax5, **kw)
+    plot_line(data, line, columns=["drape_p15", "drape_m15", "gpsalt", "dtm"], ax=ax4, **kw)
+    plot_line(data, line, columns=["utctime"], ax=ax5, **kw)
 
     for ax in [ax1, ax2, ax3, ax4]:
         ax.label_outer()
@@ -86,9 +86,9 @@ def plot_diurnal_qc(data, line, figsize=(10, 10), **kw):
     ax3 = fig.add_subplot(gs[2], sharex=ax1)
     
     
-    plot_line(data, line, columns=["L_magDIFF60", "zero"], ax=ax1, **kw)
-    plot_line(data, line, columns=["L_magDIFF15", "zero"], ax=ax2, **kw)
-    plot_line(data, line, columns=["MAGCOM", "Diurnal"], ax=ax3, **kw)
+    plot_line(data, line, columns=["l_magdiff60", "zero"], ax=ax1, **kw)
+    plot_line(data, line, columns=["l_magdiff15", "zero"], ax=ax2, **kw)
+    plot_line(data, line, columns=["magcom", "diurnal"], ax=ax3, **kw)
 
     for ax in [ax1, ax2]:
         ax.label_outer()
@@ -102,8 +102,8 @@ def plot_hf_noise_qc(data, line, figsize=(10, 10), **kw):
     ax1 = fig.add_subplot(gs[0], sharex=None)
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
     
-    plot_line(data, line, columns=["MAGCOM", "MAGUNCOM"], ax=ax1, **kw)
-    plot_line(data, line, columns=["hf_noise", "MAGCOM_4th"], ax=ax2, **kw)
+    plot_line(data, line, columns=["magcom", "maguncom"], ax=ax1, **kw)
+    plot_line(data, line, columns=["hf_noise", "magcom_4th"], ax=ax2, **kw)
 
     ax1.label_outer()
     
