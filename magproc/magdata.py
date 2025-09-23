@@ -183,7 +183,7 @@ Filename: {self.data.meta.get("filename", "")}
         crs = self.data.meta.get('crs', None)
         gdf = gpd.GeoDataFrame(
             self.crossings.copy(),
-            geometry=gpd.points_from_xy(self.crossings.Easting_1, self.crossings.Northing_1),
+            geometry=gpd.points_from_xy(self.crossings.easting_1, self.crossings.northing_1),
             crs=crs or 3857
         )
         if crs is not None:

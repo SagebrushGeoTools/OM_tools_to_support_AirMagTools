@@ -470,5 +470,5 @@ def elevation(pipeline, data):
     data.data["elevation"] = data.data["gpsalt"] - data.data["dtm"]
 
 def surface_error(pipeline, data):
-    data.data["surface_error"] = data.data["gpsalt"] - data.data["Surface"]
+    data.data["surface_error"] = data.data["gpsalt"] - data.data["surface"]
     data.data["surface_error_abs"] = np.abs(data.data["surface_error"])
