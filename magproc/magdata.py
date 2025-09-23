@@ -119,7 +119,7 @@ class MagData:
             lines = self.get_lines()
         for line in lines:
             axs = plotfn(self, line, **kw)
-            axs[0].set_title(f"line: {line}")
+            axs[0].set_title(f"Line: {line}")
             plt.show()
         
     def plot(self, columns=["magcom", "diurnal", "residual"], **kw):
