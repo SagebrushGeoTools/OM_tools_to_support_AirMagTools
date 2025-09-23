@@ -338,7 +338,7 @@ def drape_and_speed_qc(pipeline, data):
         oos_drape, oos_drape_mask = auto_drape_analysis(flight_num, line, drape_deviation, step_distance, speed_values, fidcount) # calling function defined above
         gdb.loc[line, "drape_oos"] = oos_drape_mask # Write the drape oos mask to the gdb.
 
-def noice_qc(pipeline, data,
+def noise_qc(pipeline, data,
              mag_4th_diff_oos_threshold = 0.05,
              ):
     """oos threshold for mag 4th difference. TOS specifies "Noise must
