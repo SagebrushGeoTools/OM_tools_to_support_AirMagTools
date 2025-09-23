@@ -2,7 +2,7 @@ import pandas as pd
 import re
 import importlib.resources
 
-with importlib.resources.files('magproc').joinpath('normalize.csv').open('r') as f:
+with importlib.resources.files('AirMagTools').joinpath('normalize.csv').open('r') as f:
     normalize = pd.read_csv(f).set_index("variation")["normal"].dropna().to_dict()
 
 def parse(filepath):
