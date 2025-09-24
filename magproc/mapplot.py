@@ -5,7 +5,7 @@ import geopandas as gpd
 import contextily as ctx
 
 def plot_map(gdf, zoom=12, background_size=512, max_points=None, **kw):
-    """Plot data with contextily basemap. Assumes Easting/Northing in self.meta['crs']."""
+    """Plot data with contextily basemap. Assumes coordinate pair in self.meta['crs']."""
 
     xmin, ymin, xmax, ymax = gdf.total_bounds
     x_center = (xmin + xmax) / 2
