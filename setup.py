@@ -26,7 +26,7 @@ setup(
             'diurnal_qc_for_15s_chord = AirMagTools.magfilters:diurnal_qc_for_15s_chord',
             'diurnal_qc_for_60s_chord = AirMagTools.magfilters:diurnal_qc_for_60s_chord',
             'drape_and_speed_qc = AirMagTools.magfilters:drape_and_speed_qc',
-            'noice_qc = AirMagTools.magfilters:noice_qc',
+            'noise_qc = AirMagTools.magfilters:noise_qc',
             'write_noise_summary = AirMagTools.magfilters:write_noise_summary',
             'write_diurnal_summary = AirMagTools.magfilters:write_diurnal_summary',
             'write_drape_summary = AirMagTools.magfilters:write_drape_summary',
