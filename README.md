@@ -1,10 +1,9 @@
 # Magnetic data processing pipeline
 
-This workflow is based on work done by the DGGS (Division of Geological & Geophysical Surveys https://dggs.alaska.gov). 
-The original workflow utilized Oasis Montaj and the OM python extensions. Original Author: Eric Petersen (2025-06-11).
+Based on an Oasis montaj python extension created by by Eric Petersen at the DGGS (Alaska Division of Geological & Geophysical Surveys https://dggs.alaska.gov; 2025-06-11).
 
 The pipeline itself can be run either from a jupyter notebook or from
-the command line using the "magproc" command line utility.
+the command line using the "AirMagTools" command line utility.
 
 If using Jupyter notebooks, additional tools provided to plot and QC data in
 various ways as well as do simple data transformations (e.g. change

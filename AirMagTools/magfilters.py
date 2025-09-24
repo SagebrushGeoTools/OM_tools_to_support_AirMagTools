@@ -1,0 +1,474 @@
+################## MAGNETIC QC PREP CALCULATIONS AND AUTO SUMMARY ####################################################
+"""
+Author: Eric Petersen
+Date: 2025-06-11
+
+DESCRIPTION:
+This python extension for Oasis montaj is designed to work on a geodatabase with standard
+DGGS channel naming schema. It calculates new channels necessary for QC work on production
+magnetic data, supporting QC of:
+    - Flightline altitude, deviation from the drape surface defined in the TOS
+    - Diurnal mag variability (solar storms)
+    - Magnetic noise (4th difference)
+
+This extension was translated from a .gs script previously used by Abraham et al., and 
+derived from the Geological Society of Canada (GSC)'s standard magnetic QC procedures.
+Original scripts can be found here:
+\\morta.dnr.state.ak.us\geophysics\projects\magnetic_qc_working\gs\
+Example script: NRGmag_qc_prep_script_20hz_4th_lp96_hp80_clip0p1.gs
+
+The following changes were made following the translation of the script to the python extension:
+    - Low pass / high pass filter feature not implemented (this feature may be added in the future)
+    - Speed calculation generalized so that extension is valid for data of different sampling frequencies.
+    - Auto detection capability added for identifying out-of-spec lines/line segments.
+
+AUTO DETECTION CAPABILITY:
+The extension automatically identifies lines and line segments which are out of specification in the following way:
+    - DRAPE SURFACE ('surface'): Line segments more than 15 meters over or under the drape surface for more than 800 m
+        consecutive meters along track.
+    - DIURNAL ('diurnal): Lines where diurnal mag measurements differ from the 15 second or 60 second chords by 0.5 nT or 3 nT
+        respectively.
+    - NOISE: Lines where the 4th difference value of MAGCOM ('magcom') exceeds +/-0.01 nT
+When the extension is completed running, the summary text box will display the number of lines that are out of spec (oos)
+    for each of these categories.
+Summary files recording more details will be put into %project_folder%/QC_auto_summaries/. Only categories for
+    which oos lines have been identified will be saved here. The following information will be saved to those files:
+    - "oos_drape" : a record/row for each oos segment recording Flight #, Line #, Segment fiducial Start,
+        Segment fiducial End, Length oos (out of spec), max deviation from the drape surface, avg. deviation from the
+        drape surface.
+    - "oos_diurnal": a record/row for each oos line displaying Line # and Number of records/data points oos for that line.
+    - "oos_4th_difference": a record/row for each oos line displaying Line # and Number of records/data points oos
+        for that line.
+
+After running this extension, DGGS QC dbviews can then be loaded for continuing standard QC practice.
+    The auto-detection summary files can be used to guide that process and as a second check against human
+    error in manual QC work.
+
+POTENTIAL FUTURE WORK/UPDATES:
+    - Implement low pass / high pass filter, including user inputs.
+    - Implement new magHFnoise_v2.2 filter from GSC.
+    - Implement user input for .gdb to run extension on (maybe not necessary).
+    - Implement user input for location to output auto summary files (maybe not necessary).
+
+##################### UPDATE 2025-06-18 by Eric Petersen #####################
+    - Fixed oos determination for diurnal 60 second chord (was erroneously referencing 15 second chord in this calculation)
+    - Added oos masks as new channels for Diurnal oos (15 and 60 second chords separately), 4th Difference oos. Previously
+        had oos mask for drape only.
+    - Added average speed as an output for the segment summary file for drape oos.
+    - Added flight number to oos diurnal and noise outputs.
+
+##################### UPDATE 2025-06-23 by Eric Petersen #####################
+Based off feedback from Phuong Vo (Geological Society of Canada):
+-----------------------------------------------------------------
+"With the python script “mag_qc_prep_and_auto_summary.py”, I had to add some additional lines in red checking point to see 
+if the input arrays are empty.
+
+def interpolate_array(arr):
+    ""Interpolate an array linearly.""
+    not_nans = ~np.isnan(arr)                                                #Line 74
+    if np.sum(not_nans) == 0:
+        # No valid data to interpolate from, return all NaNs of same length
+        return np.full_like(arr, np.nan, dtype=float)
+    x = np.arange(len(arr))
+    return np.interp(x, x[not_nans], arr[not_nans], left=np.nan, right=np.nan)
+
+Without this check, the interpolation function would attempt to operate on empty arrays when arr contains only NaNs, 
+leading to a runtime error.
+
+Also I added the following conditional to prevent out-of-bounds errors when slicing or accessing segments from the arrays.
+In "auto_drape_analysis" function:
+
+            # Record results                             # Line 149
+        if len(fid) > max(seg_start, seg_end) and len(flt_alt) > max(seg_start, seg_end) and len(step_dist) > max(seg_start, seg_end):
+            results.loc[len(results)] = [flight, line, fid[seg_start], fid[seg_end], seg_distance, extrema, np.nanmean(drape_deviance[seg_start:seg_end])]"
+-------------------------------------------------------------------
+I (Eric) also added a check in the "auto_drape_analysis" function to make sure that all the channel value arrays for
+the line being analyzed are the same length. If they are not, an error is thrown. They should all be the same length
+if called from within the geosoft extension.
+
+##################### UPDATE 2025-06-26 by Eric Petersen #####################
+Was previously calculating 4th difference using np.diff(data, n=4); updated to use
+the proper symmetric 4th difference formula used by GSC for airborne magnetic QC.
+Comparing this to the numpy calculation I find that the results are essentially exactly
+the same; they are just shifted in their indices. However we do want to use the 
+properly documented/industry standard formula!
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, filtfilt
+import os
+import click
+
+################## FUNCTIONS USED BY SCRIPT ####################################################
+
+def add_channel(gdb, name, dtype="float"):
+    """Create a new channel with standard properties. Datatype float."""
+    if name not in gdb.columns:
+        gdb[name] = pd.Series(dtype=dtype)
+    return gdb[name]
+
+def interpolate_array(arr):
+    """Interpolate an array linearly."""
+    not_nans = ~np.isnan(arr)
+    if np.sum(not_nans) == 0:
+        # If no valid data to interpolate from, return all NaNs of same length
+        return np.full_like(arr, np.nan, dtype=float)
+    x = np.arange(len(arr))
+    return np.interp(x, x[not_nans], arr[not_nans], left=np.nan, right=np.nan)
+
+def shift_right(arr, shift_number=1):
+    """ Shift values in array for diff/speed calcs. Default to shift right +1."""
+    shifted = np.empty_like(arr, dtype=float)
+    shifted[shift_number:] = arr[:-shift_number]
+    shifted[:shift_number] = np.nan
+    return shifted
+
+def fourth_difference(data):
+    """ Calculate fourth difference filter an an array of data"""
+
+    if len(data) < 5:
+        raise ValueError("Data array must contain at least 5 points for 4th difference.")
+    
+    # Calculate 4th difference
+    diff4 = (            # M_delta4_i
+        data[0:-4]       # M_{i-2}
+        - 4 * data[1:-3] # -4 * M_{i-1}
+        + 6 * data[2:-2] # +6 * M_{i}
+        - 4 * data[3:-1] # -4 * M_{i+1}
+        + data[4:]       # + M_{i+2}
+    )
+    
+    # Pad with NaNs at start and end
+    diff4_padded = np.full_like(data, np.nan, dtype=float)
+    diff4_padded[2:-2] = diff4
+    
+    return diff4_padded
+
+def auto_drape_analysis(flight, line, drape_deviance, step_dist, speed, fid, ztol=15, dtol=800):
+    """
+    Function to automatically identify sections of the flight which are out of spec for drape.
+    Inputs, with the exception of flight, line, ztol, & dtol, are expected to be numpy arrays derived
+        from .gdb channels for a given survey line. They should all be the same length.
+    Inputs:
+        flight = flight number, single value
+        line = line number, single value
+        flt_alt = survey flight altitude, m
+        drape = drape surface, m
+        step_dist = step distance along flight track, m
+        fid = survey fiducial
+        ztol = vertical drape tolerance, default 15 m 
+        dtol = along track distance tolerance, default 800 m
+    Outputs:
+        results = dataframe with a row for each oos segment of length greater than dtol.
+            contains the following fields:
+                flight
+                line
+                fid_start
+                fid_end
+                length_oos
+                max_drape_dev (maximum deviance from drape tolerance)
+                avg_drape_dev (average deviance from drape tolerance)
+                avg_speed (average speed during the oos segment)
+        oos_drape_mask = mask of where the flight is out of spec of the drape.
+    """
+    # Prepare results dataframe
+    results = pd.DataFrame(columns=['flight', 'line', 'fid_start','fid_end','Length_oos','max_drape_dev','avg_drape_dev','avg_speed'])
+
+    # Raise value error if flt_alt, drape, step_dist, speed, fid not all the same length.
+    if not len(drape_deviance) == len(step_dist) == len(speed) == len(fid):
+        raise ValueError("Channel arrays for auto drape analysis are not all the same length.")
+
+    # Calculate drape deviations and define out-of-spec (oos) records
+    oos_drape = ((drape_deviance > ztol) | (drape_deviance < -ztol)) #index for flight over or under drape tolerance
+    oos_drape_mask = oos_drape.astype('int8') # oos drape mask to prep for saving in channel
+
+    #print("Debugging.... oos_drape_mask", "{}".format(oos_drape_mask))
+    
+    # Find starts and ends to continuous segments of oos_drape:
+    d = np.diff(oos_drape.astype(int))
+    seg_starts = np.where(d==1)[0] + 1 # +1 because diff shifts by 1
+    seg_ends = np.where(d==-1)[0] + 1
+    # Edge case: starts at beginning
+    if oos_drape[0]:
+        seg_starts = np.r_[0, seg_starts]
+    # Edge case: ends at end
+    if oos_drape[-1]:
+        seg_ends = np.r_[seg_ends, len(oos_drape)-1]
+
+    # Go through each segment:
+    num_segs = 0 # counter for number of segments recorded out of spec
+    for seg_start, seg_end in zip(seg_starts, seg_ends):
+        seg_distance = np.nansum(step_dist[seg_start:seg_end]) # calculate total distance along segment
+        if seg_distance < dtol: # disregard if segment is shorter than dtol (default 800 m)
+            oos_drape_mask[seg_start:seg_end] = 0 # oos drape mask to prep for saving in channel; remove the segment if < 800 m
+            continue
+        else: 
+            num_segs += 1 # Keep count number of oos segments
+            # Extreme value (max for positive, min for negative)
+            if np.sign(drape_deviance[seg_start]) == 1:
+                extrema = np.nanmax(drape_deviance[seg_start:seg_end])
+            elif np.sign(drape_deviance[seg_start]) == -1:
+                extrema = np.nanmin(drape_deviance[seg_start:seg_end])
+                oos_drape_mask[seg_start:seg_end] = -1
+            # Record results
+            if len(fid) > max(seg_start, seg_end): # Make sure that the segment indices are in bounds for the channel value arrays.
+                results.loc[len(results)] = [flight, line, fid[seg_start], fid[seg_end], seg_distance, extrema, np.nanmean(drape_deviance[seg_start:seg_end]), np.nanmean(speed[seg_start:seg_end])]
+            else:
+                raise ValueError("Segment indices are out-of-bounds for channel value arrays.")
+    
+    # Return results
+    if num_segs > 0:
+        return results, oos_drape_mask
+    else:
+        return None, oos_drape_mask
+
+
+def set_constants(pipeline, data):
+    gdb = data.data    
+
+    # Constant Value Channels:
+    p_3_channel = add_channel(gdb, "p_3") # Positive 3.0 (for comparison to 60 second chord)
+    m_3_channel = add_channel(gdb, "m_3") # Negative 3.0 (for comparison to 60 second chord)
+    p_0p5_channel = add_channel(gdb, "p_0p5") # Positive 0.5 (for comparison to 15 second chord)
+    m_0p5_channel = add_channel(gdb, "m_0p5") # Negative 0.5 (for comparison to 15 second chord)
+    p_0p05_channel = add_channel(gdb, "p_0p05") # Positive 0.05 (for comparison to low-pass/high-pass channel)
+    m_0p05_channel = add_channel(gdb, "m_0p05") # Negative 0.05 (for comparison to low-pass/high-pass channel)
+    p_0p01_channel = add_channel(gdb, "p_0p01") # Positive 0.01 (for comparison to 4th diff channel)
+    m_0p01_channel = add_channel(gdb, "m_0p01") # Negative 0.01 (for comparison to 4th diff channel)
+    zero_channel = add_channel(gdb, "zero") # Zero
+
+    diurnal = gdb['diurnal'].values
+    dummy = np.full_like(diurnal, np.nan, dtype=float) # To be used for infilling with dummy values.
+    ones = np.full_like(diurnal, 1, dtype=float) # To be used for infilling with constant values.
+
+    gdb["p_3"] = ones*3 # Positive 3
+    gdb["m_3"] = ones*-3 # Negative 3
+    gdb["p_0p5"] = ones*0.5 # Positive 0.5
+    gdb["m_0p5"] = ones*-0.5 # Negative 0.5
+    gdb["p_0p05"] = ones*0.05 # Positive 0.05
+    gdb["m_0p05"] = ones*-0.05 # Negative 0.05
+    gdb["p_0p01"] = ones*0.01 # Positive 0.01
+    gdb["m_0p01"] = ones*-0.01 # Negative 0.01
+    gdb["zero"] = ones*0 # Zeros
+
+def diurnal_qc_for_15s_chord(pipeline, data,
+                             diurnal_15chord_oos_threshold = 0.5):
+    """oos threshold for diurnal 15 second chord"""
+    gdb = data.data
+    diurnal_15chord_oos_channel = add_channel(gdb, "diurnal_15chord_oos_mask", dtype='int8') # KEPT FOR COMPATIBILITY. Diurnal 15 second chord out-of-spec mask
+    chrd_Lmag15_channel = add_channel(gdb, "chrd_Lmag15")
+    l_magdiff15_channel = add_channel(gdb, "l_magdiff15")
+    for line in gdb.index.get_level_values('line').unique():
+        utctime = gdb.loc[line, 'utctime'].values
+        diurnal = gdb.loc[line, 'diurnal'].values
+        dummy = np.full_like(diurnal, np.nan, dtype=float) # To be used for infilling with dummy values.
+
+        # Calculate l_magD_15
+        cond = (np.floor(utctime / 15 ) * 15 ) == (np.floor(utctime * 10)/10)
+        l_magD_15_values = np.where(cond, diurnal, dummy) # Values of l_magD only every 15 seconds.
+        # Calculate chrd_Lmag15
+        chrd_Lmag15_values = interpolate_array(l_magD_15_values) # Interpolate between each 15 second value to produce the chord.
+        gdb.loc[line, "chrd_Lmag15"] = chrd_Lmag15_values # Write chord to the gdb
+        # Calculate l_magdiff15
+        l_magdiff15_values = diurnal - chrd_Lmag15_values # Calculate the difference
+        gdb.loc[line, "l_magdiff15"] = l_magdiff15_values # Write the diff to the gdb
+        oos_15_mask = (np.abs(l_magdiff15_values) > diurnal_15chord_oos_threshold)
+        oos_15 = sum ( oos_15_mask) # Number of data points for which 15 sec Diurnal chord is out-of-spec.
+        gdb.loc[line, "diurnal_15chord_oos"] = oos_15_mask.astype('int8') # Write the oos mask to gdb
+
+def diurnal_qc_for_60s_chord(pipeline, data,
+                             diurnal_60chord_oos_threshold = 3):
+    """ # oos threshold for diurnal 60 second chord"""
+    gdb = data.data
+    diurnal_60chord_oos_channel = add_channel(gdb, "diurnal_60chord_oos_mask", dtype='int8') # KEPT FOR COMPATIBILITY. Diurnal 60 second chord out-of-spec mask
+    chrd_Lmag60_channel = add_channel(gdb, "chrd_LmagD60")
+    l_magdiff60_channel = add_channel(gdb, "l_magdiff60")
+    for line in gdb.index.get_level_values('line').unique():
+        utctime = gdb.loc[line, 'utctime'].values
+        diurnal = gdb.loc[line, 'diurnal'].values
+        dummy = np.full_like(diurnal, np.nan, dtype=float) # To be used for infilling with dummy values.
+        
+        # Calculate l_magD_60
+        cond = (np.floor(utctime / 60 ) * 60 ) == (np.floor(utctime * 10)/10)
+        l_magD_60_values = np.where(cond, diurnal, dummy) # Values of l_magD only every 60 seconds.
+        # Calculate chrd_Lmag60
+        chrd_Lmag60_values = interpolate_array(l_magD_60_values) # Interpolate between each 60 second value to produce the chord.
+        gdb.loc[line, "chrd_Lmag60"] = chrd_Lmag60_values # Write chord to the gdb
+        # Calculate l_magdiff60
+        l_magdiff60_values = diurnal - chrd_Lmag60_values # Calculate the difference
+        gdb.loc[line, "l_magdiff60"] = l_magdiff60_values # Write the diff to the gdb
+        oos_60_mask = (np.abs(l_magdiff60_values) > diurnal_60chord_oos_threshold) # Mask for where 60 sec diurnal is out-of-spec
+        oos_60 = sum ( oos_60_mask) # Number of data points for which 60 sec Diurnal chord is out-of-spec.
+        gdb.loc[line, "diurnal_60chord_oos"] = oos_60_mask.astype('int8') # Write the oos mask to gdb
+
+def drape_and_speed_qc(pipeline, data):
+    """
+    Calculate Speed:
+    Note that in calling 'utctime' to calculate speed instead of hard-coding the data frequency that this script is agnostic/generalized
+    to data recorded in different Hz.
+    """
+    gdb = data.data    
+    drape_p15_channel = add_channel(gdb, "drape_p15") # Drape plus 15 m
+    drape_m15_channel = add_channel(gdb, "drape_m15") # Drape minus 15 m
+    speed_channel = add_channel(gdb, "speed") # Speed
+    step_distance_channel = add_channel(gdb, "step_distance") # Step distance
+    drape_deviation_channel = add_channel(gdb, "drape_deviation") # flight altitude deviation from drape.
+    drape_oos_channel = add_channel(gdb, "drape_oos_mask", dtype='int8') # KEPT FOR COMPATIBILITY. Drape out-of-spec mask
+    for line in gdb.index.get_level_values('line').unique():
+        flight = gdb.loc[line, 'flight'].values
+        utctime = gdb.loc[line, 'utctime'].values
+        easting = gdb.loc[line, 'easting'].values
+        northing = gdb.loc[line, 'northing'].values
+        surface = gdb.loc[line, 'surface'].values
+        gpsalt = gdb.loc[line, 'gpsalt'].values
+        fidcount = gdb.loc[line].index.get_level_values('fidcount').values
+        flight_num = flight[0]
+        
+        gdb.loc[line, "drape_p15"] = surface+15 # Drape surface plus 15 m
+        gdb.loc[line, "drape_m15"] = surface-15 # Drape surface minus 15 m
+        step_distance = np.sqrt( (shift_right(easting) - easting)**2 + (shift_right(northing) - northing)**2)
+        speed_values = step_distance / (utctime - shift_right(utctime))
+        drape_deviation = gpsalt - surface # deviation from drape
+        gdb.loc[line, "drape_deviation"] = drape_deviation # Write drape deviation values to gdb.
+        gdb.loc[line, "step_distance"] = step_distance # Write step distance values to gdb.
+        gdb.loc[line, "speed"] = speed_values # Write speed values to gdb.
+
+        # Detect and record out-of-spec segments for drape:
+        oos_drape, oos_drape_mask = auto_drape_analysis(flight_num, line, drape_deviation, step_distance, speed_values, fidcount) # calling function defined above
+        gdb.loc[line, "drape_oos"] = oos_drape_mask # Write the drape oos mask to the gdb.
+
+def noise_qc(pipeline, data,
+             mag_4th_diff_oos_threshold = 0.05,
+             ):
+    """oos threshold for mag 4th difference. TOS specifies "Noise must
+    be limited to 0.1 nT, peak to peak." +/-0.05 nT threshold as easy
+    way to try to catch that."""
+    
+    gdb = data.data    
+    magcom_2nd_channel = add_channel(gdb, "magcom_2nd") # 2nd difference
+    magcom_4th_channel = add_channel(gdb, "magcom_4th") # 4th difference
+    mag_4th_diff_oos_channel = add_channel(gdb, "mag_4th_diff_oos_mask", dtype='int8') # KEPT FOR COMPATIBILITY. 4th difference out-of-spec mask
+    for line in gdb.index.get_level_values('line').unique():
+        magcom = gdb.loc[line, 'magcom'].values
+        mag_4th_diff = fourth_difference(magcom) # 4th difference values. Discrete. Non-normalized. Was originally calculated using #np.diff(magcom, n=4)
+        gdb.loc[line, "magcom_2nd"] = np.pad(np.diff(magcom, n=2), (0, 2), constant_values=np.nan) # save 2nd difference to gdb
+        gdb.loc[line, "magcom_4th"] = mag_4th_diff # save 4th difference to gdb
+        # Identify if there is oos 4th difference on this line:
+        oos_4th_mask = (np.abs(mag_4th_diff) > mag_4th_diff_oos_threshold) # Where 4th diff noise out-of-spec mask.
+        oos_4th = sum ( oos_4th_mask) # Number of data points for which 4th difference noise out-of-spec.
+        gdb.loc[line, "mag_4th_diff_oos"] = oos_4th_mask.astype('int8') # Write the oos mask to gdb
+
+    data.data = gdb
+    return data
+
+def write_noise_summary(pipeline, data, filename="oos_4th_difference.csv"):
+    # lines with at least one data point for which 4th difference noise out-of-spec.
+    gdb = data.data
+    out_path_noise = f'{pipeline.pipeline["out_path"]}/{filename}'
+    noise_summary = pd.DataFrame(columns=['flight', 'line', 'oos_Count'])
+    for line in gdb.index.get_level_values('line').unique():
+        flight = gdb.loc[line, 'flight'].values
+        flight_num = flight[0]
+        oos_4th_mask = gdb.loc[line, "mag_4th_diff_oos"]
+        oos_4th = sum(oos_4th_mask)
+        if oos_4th > 0:
+            noise_summary.loc[len(noise_summary)] = [flight_num, line, oos_4th]
+    if len(noise_summary) > 0: # save only if any lines out-of-spec.
+        noise_summary.to_csv(out_path_noise, index=False)
+        
+def write_diurnal_summary(pipeline, data, filename="oos_diurnal.csv"):
+    # lines with at least one data point for which 15 sec or 60 sec Diurnal chord is out-of-spec
+    gdb = data.data
+    out_path_diurnal = f'{pipeline.pipeline["out_path"]}/{filename}'
+    diurnal_summary = pd.DataFrame(columns=['flight', 'line', 'oos_Count_15chord', 'oos_Count_60chord'])
+    for line in gdb.index.get_level_values('line').unique():
+        flight = gdb.loc[line, 'flight'].values
+        flight_num = flight[0]
+        oos_15_mask = gdb.loc[line, "diurnal_15chord_oos"]
+        oos_15 = sum(oos_15_mask)
+        oos_60_mask = gdb.loc[line, "diurnal_60chord_oos"]
+        oos_60 = sum(oos_60_mask)
+        if oos_15 > 0 or oos_60 > 0:
+            diurnal_summary.loc[len(diurnal_summary)] = [flight_num, line, oos_15, oos_60]
+    if len(diurnal_summary) > 0: # save only if any lines out-of-spec.
+        diurnal_summary.to_csv(out_path_diurnal, index=False)
+
+def write_drape_summary(pipeline, data, filename="oos_drape.csv"):
+    # lines with at least one data point for which 4th difference noise out-of-spec.
+    gdb = data.data
+    out_path_drape = f'{pipeline.pipeline["out_path"]}/{filename}'
+    drape_summary = pd.DataFrame(columns=['flight', 'line', 'fid_start','fid_end','Length_oos','max_drape_dev','avg_drape_dev','avg_speed'])
+    for line in gdb.index.get_level_values('line').unique():
+        flight = gdb.loc[line, 'flight'].values
+        fidcount = gdb.loc[line].index.get_level_values('fidcount').values
+        flight_num = flight[0]
+
+        drape_deviation = gdb.loc[line, "drape_deviation"].values
+        step_distance = gdb.loc[line, "step_distance"].values
+        speed_values = gdb.loc[line, "speed"].values
+
+        # Detect and record out-of-spec segments for drape:
+        oos_drape, oos_drape_mask = auto_drape_analysis(flight_num, line, drape_deviation, step_distance, speed_values, fidcount) # calling function defined above
+        gdb.loc[line, "drape_oos"] = oos_drape_mask # Write the drape oos mask to the gdb.
+        if oos_drape is not None:
+            drape_summary = pd.concat([drape_summary, oos_drape], ignore_index=True) # add oos drape segments to summary dataframe
+
+    oos_drape_segment_count = len(drape_summary)
+    oos_drape_line_count = len(drape_summary['line'].unique())
+    oos_drape_meters = np.sum(drape_summary['Length_oos'])
+    if oos_drape_segment_count > 0:
+        drape_summary.to_csv(out_path_drape, float_format="%.0f", index=False)
+
+    # sum_text = "{} lines ({} segments, {:.1f} line-km total) with drape out of spec. \n {} lines with diurnal out of spec. \n {} lines with potential noise problems. \n\n Summary files saved to {} \n\n Please move summary files to appropriate archive directory.".format(
+    #     oos_drape_line_count, oos_drape_segment_count, oos_drape_meters/1000, oos_diurnal_line_count, oos_4th_line_count, out_path)
+
+    # print("QC Calculations Complete.", sum_text)
+
+def set_meta(pipeline, data, **meta):
+    data.meta.update(meta)
+
+def frequency_to_butterworth_cutoff(sampling_freq, cutoff_freqs):
+    nyquist = 0.5 * sampling_freq
+    if isinstance(cutoff_freqs, (list, tuple)):
+        return [f / nyquist for f in cutoff_freqs]
+    else:
+        return cutoff_freqs / nyquist
+
+def butterworth_filter_array(data, cutoff_freq, sampling_freq, order=4, btype='low'):
+    normalized_cutoff = frequency_to_butterworth_cutoff(sampling_freq, cutoff_freq)
+    b, a = butter(order, normalized_cutoff, btype=btype, analog=False)
+    return filtfilt(b, a, data)
+
+def butterworth_filter(pipeline, data, column='magcom', column_out="magcom_filtered", cutoff_freq=1.0, order=4, btype='low'):
+    sampling_freq = data.get_sample_frequency()
+    def filter_group(group):
+        group = group.copy()
+        group[column_out] = butterworth_filter_array(group[column].values, cutoff_freq, sampling_freq, order, btype=btype)
+        return group
+    data.data = data.data.groupby(level='line', group_keys=False).apply(filter_group)
+
+def lowpass_filter_butterworth(pipeline, data, column='magcom', column_out="magcom_filtered", cutoff_freq=1.0, order=4):
+    butterworth_filter(pipeline, data, column=column, column_out=column_out, cutoff_freq=cutoff_freq, order=order, btype='low')
+
+def highpass_filter_butterworth(pipeline, data, column='magcom', column_out="magcom_filtered", cutoff_freq=1.0, order=4):
+    butterworth_filter(pipeline, data, column=column, column_out=column_out, cutoff_freq=cutoff_freq, order=order, btype='high')
+
+def bandpass_filter_butterworth(pipeline, data, column='magcom', column_out="magcom_filtered", cutoff_freq_low=1.0, cutoff_freq_high=1.0, order=4):
+    butterworth_filter(pipeline, data, column=column, column_out=column_out, cutoff_freq=[cutoff_freq_low, cutoff_freq_high], order=order, btype='low')
+
+def downline_distance_group(group):
+    group = group.copy()
+    group["distance"] = np.sqrt((group.easting - group.easting.shift(1)).fillna(0) ** 2
+                                + (group.northing - group.northing.shift(1)).fillna(0) **2).cumsum()
+    return group
+ 
+def downline_distance(pipeline, data):
+    data.data = data.data.groupby(level='line', group_keys=False).apply(downline_distance_group)
+
+def elevation(pipeline, data):
+    data.data["elevation"] = data.data["gpsalt"] - data.data["dtm"]
+
+def surface_error(pipeline, data):
+    data.data["surface_error"] = data.data["gpsalt"] - data.data["surface"]
+    data.data["surface_error_abs"] = np.abs(data.data["surface_error"])
