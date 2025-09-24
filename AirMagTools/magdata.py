@@ -34,7 +34,7 @@ class MagData:
             meta = {}
         meta["filename"] = os.path.split(path)[-1]
         meta.update(kws)
-        return cls(df.set_index(["Line", "FIDCOUNT"]), **meta)
+        return cls(df.set_index(["line", "fidcount"]), **meta)
 
     def save(self, path: str):
         """Save mag data to file. Filename should end in .mag.zip"""
@@ -51,15 +51,15 @@ class MagData:
 {self.data.describe().T.to_string()}"""
 
     def get_lines(self):
-        return self.data.index.get_level_values('Line').unique()
+        return self.data.index.get_level_values('line').unique()
     
     def get_sample_frequency(self):
         if "sample_frequency" not in self.meta:
-            timediffs = self.data.UTCTIME - self.data.UTCTIME.shift(1)
+            timediffs = self.data.utctime - self.data.utctime.shift(1)
             self.meta["sample_frequency"] = float(
                 1 / (timediffs[
-                    self.data.index.get_level_values('Line')
-                    == pd.Series(self.data.index.get_level_values('Line')).shift(1)
+                    self.data.index.get_level_values('line')
+                    == pd.Series(self.data.index.get_level_values('line')).shift(1)
                 ].mode()[0]))
         return self.meta["sample_frequency"]
 
@@ -67,7 +67,7 @@ class MagData:
         crs = self.meta.get('crs', None)
         gdf = gpd.GeoDataFrame(
             self.data.copy(),
-            geometry=gpd.points_from_xy(self.data.Easting, self.data.Northing),
+            geometry=gpd.points_from_xy(self.data.easting, self.data.northing),
             crs=crs or 3857
         )
         if crs is not None:
@@ -78,8 +78,8 @@ class MagData:
         data = self.data.copy()
         geom = self.as_geodataframe().to_crs(crs).geometry
 
-        data["Easting"] = geom.x.values
-        data["Northing"] = geom.y.values
+        data["easting"] = geom.x.values
+        data["northing"] = geom.y.values
 
         meta = copy.deepcopy(self.meta)
         meta["crs"] = crs
@@ -101,8 +101,8 @@ class MagData:
 
         return type(self)(data, **meta)
     
-    def plot_map(self, markersize=1, column="MAGCOM", zoom=9, max_points=5000, **kw):
-        """Plot data with contextily basemap. Assumes Easting/Northing in self.meta['crs']."""
+    def plot_map(self, markersize=1, column="magcom", zoom=9, max_points=5000, **kw):
+        """Plot data with contextily basemap. Assumes coordinate pair in self.meta['crs']."""
         gdf = self.as_geodataframe()
         ax = mapplot.plot_map(gdf, markersize=markersize, column=column, zoom=zoom, max_points=max_points, **kw)
         ax.set_title(f"Mag Data: {self.meta.get('filename', '')}")
@@ -119,26 +119,26 @@ class MagData:
             lines = self.get_lines()
         for line in lines:
             axs = plotfn(self, line, **kw)
-            axs[0].set_title(f"Line: {line}")        
+            axs[0].set_title(f"Line: {line}")
             plt.show()
         
-    def plot(self, columns=["MAGCOM", "Diurnal", "Residual"], **kw):
+    def plot(self, columns=["magcom", "diurnal", "residual"], **kw):
         self.plot_lines(MagData.plot_line, columns=columns, **kw)
 
 
     def find_line_crossings(self, max_dist = 10):
         df = self.data.reset_index()
 
-        xs = df.Easting.values
-        ys = df.Northing.values
+        xs = df.easting.values
+        ys = df.northing.values
 
         coords = np.vstack((xs, ys)).T
         tree = cKDTree(coords)
 
         pairs = tree.query_pairs(r=max_dist, output_type="ndarray")
-        lines = df['Line'].values
+        lines = df['line'].values
 
-        # Filter pairs where Line differs
+        # Filter pairs where line differs
         mask = lines[pairs[:, 0]] != lines[pairs[:, 1]]
         filtered_pairs = pairs[mask]
 
@@ -158,11 +158,11 @@ class MagData:
                         ).assign(distance=distances)
 
         results = results.assign(
-            GPSALT_DIFF = np.abs(results.GPSALT_1 - results.GPSALT_2),
-            MAGCOM_DIFF = np.abs(results.MAGCOM_1 - results.MAGCOM_2),
-            MAGUNCOM_DIFF = np.abs(results.MAGUNCOM_1 - results.MAGUNCOM_2))
+            gpsalt_diff = np.abs(results.gpsalt_1 - results.gpsalt_2),
+            magcom_diff = np.abs(results.magcom_1 - results.magcom_2),
+            maguncom_diff = np.abs(results.maguncom_1 - results.maguncom_2))
         
-        min_idx = results.groupby(['Line_1', 'Line_2'])['distance'].idxmin()
+        min_idx = results.groupby(['line_1', 'line_2'])['distance'].idxmin()
         return MagDataLineCrossings(
             self, results.loc[min_idx].reset_index(drop=True),
             max_dist = max_dist)
@@ -177,20 +177,20 @@ class MagDataLineCrossings:
         return f"""Max distance: {self.max_dist}
 Filename: {self.data.meta.get("filename", "")}
         
-{self.crossings[["GPSALT_DIFF", "MAGCOM_DIFF", "MAGUNCOM_DIFF", "distance"]].describe().T.to_string()}"""
+{self.crossings[["gpsalt_diff", "magcom_diff", "maguncom_diff", "distance"]].describe().T.to_string()}"""
 
     def as_geodataframe(self):
         crs = self.data.meta.get('crs', None)
         gdf = gpd.GeoDataFrame(
             self.crossings.copy(),
-            geometry=gpd.points_from_xy(self.crossings.Easting_1, self.crossings.Northing_1),
+            geometry=gpd.points_from_xy(self.crossings.easting_1, self.crossings.northing_1),
             crs=crs or 3857
         )
         if crs is not None:
             gdf = gdf.to_crs(epsg=3857)
         return gdf
     
-    def plot_map(self, markersize=1, column="MAGCOM_DIFF", zoom=9, **kw):
+    def plot_map(self, markersize=1, column="magcom_diff", zoom=9, **kw):
         gdf = self.as_geodataframe()
         return mapplot.plot_map(gdf, markersize=markersize, zoom=zoom, column=column, **kw)        
     
@@ -203,19 +203,19 @@ Filename: {self.data.meta.get("filename", "")}
         ax1 = fig.add_subplot(gs[0, 1], sharey=ax0)
         ax2 = fig.add_subplot(gs[1, 0], sharex=ax1)
 
-        ax0.scatter(self.crossings.MAGCOM_DIFF, self.crossings.GPSALT_DIFF, s=1)
-        ax0.set_xlabel("MAGCOM difference")
+        ax0.scatter(self.crossings.magcom_diff, self.crossings.gpsalt_diff, s=1)
+        ax0.set_xlabel("magcom difference")
         ax0.set_ylabel("Altitude difference (m)")
 
-        ax0.secondary_xaxis('top').set_xlabel("MAGCOM difference")
+        ax0.secondary_xaxis('top').set_xlabel("magcom difference")
         
-        ax1.hist(self.crossings.GPSALT_DIFF, bins=100, orientation='horizontal')
+        ax1.hist(self.crossings.gpsalt_diff, bins=100, orientation='horizontal')
         ax1.set_xlabel("Number of line crossings")
         ax1.secondary_yaxis('right').set_ylabel("Altitude difference (m)")
 
-        ax2.hist(self.crossings.MAGCOM_DIFF, bins=100, color="blue", label="MAGCOM")
-        ax2.hist(self.crossings.MAGUNCOM_DIFF, bins=100, color="red", histtype='step', label="MAGUNCOM")
-        ax2.set_xlabel("MAGCOM/MAGUNCOM difference")
+        ax2.hist(self.crossings.magcom_diff, bins=100, color="blue", label="magcom")
+        ax2.hist(self.crossings.maguncom_diff, bins=100, color="red", histtype='step', label="maguncom")
+        ax2.set_xlabel("magcom/maguncom difference")
         ax2.legend()
         ax2.invert_yaxis()
         ax2.secondary_yaxis('right').set_ylabel("Number of line crossings")
